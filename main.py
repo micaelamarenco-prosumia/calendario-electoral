@@ -1,6 +1,7 @@
 import time
 import json
 import os
+import sys
 import urllib.parse
 import feedparser
 import requests
@@ -14,6 +15,32 @@ from config import (
 )
 
 ARCHIVO_ENVIADOS = "enviados.json"
+
+
+def verificar_configuracion():
+    """Revisa el token y el chat id antes de empezar, y avisa claro en los logs si algo falla."""
+    if not TELEGRAM_TOKEN:
+        print("ERROR: falta la variable TELEGRAM_TOKEN en Railway (pestana Variables).")
+        sys.exit(1)
+    if not TELEGRAM_CHAT_ID:
+        print("ERROR: falta la variable TELEGRAM_CHAT_ID en Railway (pestana Variables).")
+        sys.exit(1)
+
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe", timeout=15)
+    except Exception as error:
+        print("ERROR: no se pudo conectar con Telegram:", error)
+        sys.exit(1)
+
+    if not r.ok:
+        print("ERROR: Telegram no reconoce el token. Volve a copiarlo desde @BotFather "
+              "(/mybots > tu bot > API Token) y pegalo en la variable TELEGRAM_TOKEN.")
+        print(f"(El token cargado tiene {len(TELEGRAM_TOKEN)} caracteres; "
+              f"empieza con {TELEGRAM_TOKEN[:4]}...)")
+        sys.exit(1)
+
+    nombre = r.json().get("result", {}).get("username", "")
+    print(f"Token OK: conectado como @{nombre}")
 
 
 def cargar_enviados():
@@ -41,6 +68,10 @@ def buscar_noticias(provincia):
     return feed.entries
 
 
+def escapar_html(texto):
+    return texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -52,6 +83,8 @@ def enviar_telegram(mensaje):
     respuesta = requests.post(url, data=payload, timeout=15)
     if not respuesta.ok:
         print("Error enviando a Telegram:", respuesta.text)
+        return False
+    return True
 
 
 def revisar_todas_las_provincias(enviados):
@@ -75,24 +108,27 @@ def revisar_todas_las_provincias(enviados):
                 continue
 
             mensaje = (
-                f"<b>{provincia}</b>\n"
-                f"{titulo}\n"
-                f"Fuente: {fuente}\n"
+                f"<b>{escapar_html(provincia)}</b>\n"
+                f"{escapar_html(titulo)}\n"
+                f"Fuente: {escapar_html(fuente)}\n"
                 f"{enlace}"
             )
-            enviar_telegram(mensaje)
-            enviados.add(enlace)
+            if enviar_telegram(mensaje):
+                enviados.add(enlace)
             time.sleep(1)
 
     guardar_enviados(enviados)
 
 
 def main():
+    verificar_configuracion()
+    enviar_telegram("Bot de alertas electorales iniciado. Voy a avisarte cuando haya novedades.")
     enviados = cargar_enviados()
     print("Bot de alertas electorales iniciado.")
     while True:
         print("Revisando novedades...")
         revisar_todas_las_provincias(enviados)
+        print(f"Listo. Proxima revision en {INTERVALO_MINUTOS} minutos.")
         time.sleep(INTERVALO_MINUTOS * 60)
 
 

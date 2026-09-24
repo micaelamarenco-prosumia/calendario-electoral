@@ -1,5 +1,20 @@
-TELEGRAM_TOKEN = "PONE_ACA_TU_TOKEN_DE_BOTFATHER"
-TELEGRAM_CHAT_ID = "PONE_ACA_TU_CHAT_ID"
+import os
+
+
+def _limpiar(valor):
+    """Saca espacios, comillas y un 'bot' de mas al principio, por si se copiaron sin querer."""
+    if not valor:
+        return ""
+    valor = valor.strip().strip('"').strip("'").strip()
+    if valor.lower().startswith("bot") and ":" in valor:
+        valor = valor[3:]
+    return valor
+
+
+# Estos dos valores se cargan en Railway, en la pestana Variables.
+# No los escribas aca: el repositorio de GitHub puede ser visible.
+TELEGRAM_TOKEN = _limpiar(os.environ.get("TELEGRAM_TOKEN"))
+TELEGRAM_CHAT_ID = _limpiar(os.environ.get("TELEGRAM_CHAT_ID"))
 
 INTERVALO_MINUTOS = 60
 
