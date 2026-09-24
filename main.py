@@ -19,11 +19,19 @@ ARCHIVO_ENVIADOS = "enviados.json"
 
 def verificar_configuracion():
     """Revisa el token y el chat id antes de empezar, y avisa claro en los logs si algo falla."""
-    if not TELEGRAM_TOKEN:
-        print("ERROR: falta la variable TELEGRAM_TOKEN en Railway (pestana Variables).")
-        sys.exit(1)
-    if not TELEGRAM_CHAT_ID:
-        print("ERROR: falta la variable TELEGRAM_CHAT_ID en Railway (pestana Variables).")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        faltante = "TELEGRAM_TOKEN" if not TELEGRAM_TOKEN else "TELEGRAM_CHAT_ID"
+        print(f"ERROR: falta la variable {faltante} en Railway (pestana Variables).")
+        variables_telegram = sorted(
+            k for k in os.environ if "TELEGRAM" in k.upper()
+        )
+        if variables_telegram:
+            print("Variables con 'TELEGRAM' en el nombre que SI encuentra el proceso:",
+                  variables_telegram)
+        else:
+            print("El proceso no encuentra NINGUNA variable con 'TELEGRAM' en el nombre. "
+                  "Esto suele pasar cuando las variables estan cargadas en un servicio o "
+                  "environment distinto al que esta corriendo este deploy.")
         sys.exit(1)
 
     try:
