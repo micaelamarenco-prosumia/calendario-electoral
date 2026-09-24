@@ -13,8 +13,24 @@ from config import (
     PALABRAS_CLAVE,
     INTERVALO_MINUTOS,
 )
+from analizador import analizar
 
-ARCHIVO_ENVIADOS = "enviados.json"
+ARCHIVO_VISTOS = "vistos.json"
+ARCHIVO_ESTADO = "estado_provincias.json"
+
+ETIQUETAS_CAMPO = {
+    "paso": "PASO",
+    "fecha_confirmada": "Fecha confirmada",
+    "mes_tentativo": "Mes tentativo (sin confirmar)",
+    "desdoblamiento": "Desdoblamiento",
+}
+
+VALORES_LEGIBLES = {
+    ("paso", "elimina"): "Se eliminan",
+    ("paso", "mantiene"): "Se mantienen",
+    ("desdoblamiento", "separada"): "Elección separada de las nacionales",
+    ("desdoblamiento", "junto"): "Junto con las elecciones nacionales",
+}
 
 
 def verificar_configuracion():
@@ -22,9 +38,7 @@ def verificar_configuracion():
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         faltante = "TELEGRAM_TOKEN" if not TELEGRAM_TOKEN else "TELEGRAM_CHAT_ID"
         print(f"ERROR: falta la variable {faltante} en Railway (pestana Variables).")
-        variables_telegram = sorted(
-            k for k in os.environ if "TELEGRAM" in k.upper()
-        )
+        variables_telegram = sorted(k for k in os.environ if "TELEGRAM" in k.upper())
         if variables_telegram:
             print("Variables con 'TELEGRAM' en el nombre que SI encuentra el proceso:",
                   variables_telegram)
@@ -51,16 +65,26 @@ def verificar_configuracion():
     print(f"Token OK: conectado como @{nombre}")
 
 
-def cargar_enviados():
-    if os.path.exists(ARCHIVO_ENVIADOS):
-        with open(ARCHIVO_ENVIADOS, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
+def cargar_json(ruta, default):
+    if os.path.exists(ruta):
+        with open(ruta, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
 
 
-def guardar_enviados(enviados):
-    with open(ARCHIVO_ENVIADOS, "w", encoding="utf-8") as f:
-        json.dump(list(enviados), f)
+def guardar_json(ruta, datos):
+    with open(ruta, "w", encoding="utf-8") as f:
+        json.dump(datos, f, ensure_ascii=False, indent=2)
+
+
+def plantilla_estado():
+    return {
+        "paso": None,
+        "fecha_confirmada": None,
+        "mes_tentativo": None,
+        "desdoblamiento": None,
+        "fuente": None,
+    }
 
 
 def armar_query(provincia):
@@ -80,6 +104,10 @@ def escapar_html(texto):
     return texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def formatear_valor(campo, valor):
+    return VALORES_LEGIBLES.get((campo, valor), valor)
+
+
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -95,7 +123,11 @@ def enviar_telegram(mensaje):
     return True
 
 
-def revisar_todas_las_provincias(enviados):
+def revisar_todas_las_provincias(vistos, estado):
+    """Busca noticias nuevas, las analiza, actualiza el estado por provincia
+    y devuelve la lista de cambios detectados en esta pasada."""
+    cambios = []
+
     for provincia in PROVINCIAS:
         try:
             entradas = buscar_noticias(provincia)
@@ -105,37 +137,96 @@ def revisar_todas_las_provincias(enviados):
 
         for entrada in entradas:
             enlace = entrada.get("link")
-            if not enlace or enlace in enviados:
+            if not enlace or enlace in vistos:
                 continue
 
             titulo = entrada.get("title", "")
-            fuente = entrada.get("source", {}).get("title", "")
-            texto_completo = f"{titulo} {fuente}".lower()
+            resumen = entrada.get("summary", "")
+            texto_completo = f"{titulo} {resumen}"
+            texto_low = texto_completo.lower()
 
-            if not any(clave.lower() in texto_completo for clave in PALABRAS_CLAVE):
+            # Primer filtro grueso: que la nota toque alguno de los temas que nos interesan.
+            if not any(clave.lower() in texto_low for clave in PALABRAS_CLAVE):
+                vistos.add(enlace)
                 continue
 
-            mensaje = (
-                f"<b>{escapar_html(provincia)}</b>\n"
-                f"{escapar_html(titulo)}\n"
-                f"Fuente: {escapar_html(fuente)}\n"
-                f"{enlace}"
-            )
-            if enviar_telegram(mensaje):
-                enviados.add(enlace)
-            time.sleep(1)
+            vistos.add(enlace)
+            detectado = analizar(texto_completo)
+            if not detectado:
+                continue
 
-    guardar_enviados(enviados)
+            actual = estado.setdefault(provincia, plantilla_estado())
+            cambios_provincia = {}
+            for campo, valor_nuevo in detectado.items():
+                if actual.get(campo) != valor_nuevo:
+                    cambios_provincia[campo] = (actual.get(campo), valor_nuevo)
+                    actual[campo] = valor_nuevo
+
+            if not cambios_provincia:
+                continue
+
+            # Si ahora hay fecha confirmada, el "mes tentativo" deja de ser relevante.
+            if "fecha_confirmada" in cambios_provincia and actual.get("mes_tentativo"):
+                actual["mes_tentativo"] = None
+
+            actual["fuente"] = enlace
+            cambios.append((provincia, cambios_provincia, enlace))
+
+    guardar_json(ARCHIVO_ESTADO, estado)
+    guardar_json(ARCHIVO_VISTOS, list(vistos))
+    return cambios
+
+
+def armar_mensajes(cambios):
+    """Arma uno o varios mensajes de Telegram (por si son muchos cambios y
+    superan el limite de caracteres) con los cambios detectados."""
+    bloques = []
+    for provincia, cambios_provincia, enlace in cambios:
+        lineas = [f"<b>{escapar_html(provincia)}</b>"]
+        for campo, (viejo, nuevo) in cambios_provincia.items():
+            etiqueta = ETIQUETAS_CAMPO.get(campo, campo)
+            lineas.append(f"{etiqueta}: {formatear_valor(campo, nuevo)}")
+        lineas.append(f"Fuente: {enlace}")
+        bloques.append("\n".join(lineas))
+
+    mensajes = []
+    actual = "📋 <b>Novedades electorales</b>\n\n"
+    limite = 3500
+    for bloque in bloques:
+        candidato = actual + bloque + "\n\n"
+        if len(candidato) > limite and actual.strip():
+            mensajes.append(actual.strip())
+            actual = bloque + "\n\n"
+        else:
+            actual = candidato
+    if actual.strip():
+        mensajes.append(actual.strip())
+    return mensajes
 
 
 def main():
     verificar_configuracion()
-    enviar_telegram("Bot de alertas electorales iniciado. Voy a avisarte cuando haya novedades.")
-    enviados = cargar_enviados()
+    vistos = set(cargar_json(ARCHIVO_VISTOS, []))
+    estado = cargar_json(ARCHIVO_ESTADO, {})
+
+    enviar_telegram(
+        "Bot de alertas electorales iniciado. Te voy a escribir solo cuando "
+        "detecte novedades sobre PASO, fecha o desdoblamiento en alguna provincia."
+    )
     print("Bot de alertas electorales iniciado.")
+
     while True:
         print("Revisando novedades...")
-        revisar_todas_las_provincias(enviados)
+        cambios = revisar_todas_las_provincias(vistos, estado)
+
+        if cambios:
+            print(f"Se detectaron cambios en {len(cambios)} provincia(s). Enviando resumen...")
+            for mensaje in armar_mensajes(cambios):
+                enviar_telegram(mensaje)
+                time.sleep(1)
+        else:
+            print("Sin novedades en esta vuelta.")
+
         print(f"Listo. Proxima revision en {INTERVALO_MINUTOS} minutos.")
         time.sleep(INTERVALO_MINUTOS * 60)
 
